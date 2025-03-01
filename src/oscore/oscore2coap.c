@@ -154,10 +154,12 @@ options_reorder(struct o_coap_option *U_options, uint8_t U_options_cnt,
 	*out_options_cnt = 0;
 	memset(out_options, 0, sizeof(struct o_coap_option) * max_coap_opt_cnt);
 
-	/*Get the all outer options. Discard OSCORE and outer OBSERVE as specified in 8.2 and 8.4 */
+	/*Get the all outer options. Discard OSCORE and outer OBSERVE as specified in 8.2 and 8.4
+	 * Discard outer NO_RESPONSE option as specified in 4.1.3.6 and D.5.2 */
 	for (uint8_t i = 0; i < U_options_cnt; i++) {
 		if ((U_options[i].option_number != OSCORE) &&
-		    (U_options[i].option_number != OBSERVE)) {
+		    (U_options[i].option_number != OBSERVE) &&
+		    (U_options[i].option_number != NO_RESPONSE)) {
 			out_options[*out_options_cnt] = U_options[i];
 			*out_options_cnt += 1;
 		}
@@ -250,7 +252,7 @@ static inline enum err o_coap_pkg_generate(struct byte_array *decrypted_payload,
  * @param output_coap Output decrypted coap packet.
  * @return enum err 
  */
-static enum err
+static enum err 
 decrypt_wrapper(struct byte_array *ciphertext, struct byte_array *plaintext,
 		struct context *c,
 		struct compressed_oscore_option *new_nonce_oscore_option,
@@ -260,12 +262,6 @@ decrypt_wrapper(struct byte_array *ciphertext, struct byte_array *plaintext,
 	BYTE_ARRAY_NEW(new_nonce, NONCE_LEN, NONCE_LEN);
 	struct byte_array nonce;
 
-	/* Read necessary fields from the input packet. */
-	enum o_coap_msg msg_type_oscore;
-	TRY(coap_get_message_type(input_oscore, &msg_type_oscore));
-	struct byte_array token =
-		BYTE_ARRAY_INIT(input_oscore->token, input_oscore->header.TKL);
-
 	/* Read Request PIV and KID fields from OSCORE option, if available. Update using interactions wrapper. */
 	struct byte_array request_piv;
 	struct byte_array request_kid;
@@ -273,9 +269,9 @@ decrypt_wrapper(struct byte_array *ciphertext, struct byte_array *plaintext,
 		request_piv = new_nonce_oscore_option->piv;
 		request_kid = new_nonce_oscore_option->kid;
 	}
-	TRY(oscore_interactions_read_wrapper(msg_type_oscore, &token,
-					     c->rrc.interactions, &request_piv,
-					     &request_kid));
+	TRY(oscore_interactions_read_wrapper(c->rrc.interactions,
+					     input_oscore, &request_piv,
+					     &request_kid, NULL));
 	/* Message type read from encrypted packet can be invalid due to external OBSERVE option change,
 	   but it is sufficient enough for the interactions read wrapper to work properly,
 	   as it only need to know whether the packet is any kind of response. */
@@ -311,14 +307,7 @@ decrypt_wrapper(struct byte_array *ciphertext, struct byte_array *plaintext,
 
 	/* Handle OSCORE interactions after successful decryption.
 	   Decrypted packet is used for URI Paths and message type, as original values are modified while encrypting. */
-	enum o_coap_msg msg_type;
-	TRY(coap_get_message_type(output_coap, &msg_type));
-	BYTE_ARRAY_NEW(uri_paths, OSCORE_MAX_URI_PATH_LEN,
-		       OSCORE_MAX_URI_PATH_LEN);
-	TRY(uri_path_create(output_coap->options, output_coap->options_cnt,
-			    uri_paths.ptr, &(uri_paths.len)));
-	TRY(oscore_interactions_update_wrapper(msg_type, &token, &uri_paths,
-					       c->rrc.interactions,
+	TRY(oscore_interactions_update_wrapper(c->rrc.interactions, output_coap,
 					       &request_piv, &request_kid));
 
 	return ok;
@@ -348,6 +337,15 @@ enum err oscore2coap(uint8_t *buf_in, uint32_t buf_in_len, uint8_t *buf_out,
 	TRY(oscore_option_parser(oscore_packet.options,
 				 oscore_packet.options_cnt, &oscore_option));
 
+	/* KID and KID Context parameters SHOULD NOT be present in respo
+	nses (see RFC 8613 p. 5) so we retrive them from the context */
+	if ((0 == oscore_option.kid.len) && (NULL == oscore_option.kid.ptr)) {
+			oscore_option.kid = c->rc.recipient_id;
+	}
+	if ((0 == oscore_option.kid_context.len) && (NULL == oscore_option.kid_context.ptr)) {
+			oscore_option.kid_context = c->cc.id_context;
+	}
+
 	/* Encrypted packet payload */
 	struct byte_array *ciphertext = &oscore_packet.payload;
 
@@ -365,11 +363,11 @@ enum err oscore2coap(uint8_t *buf_in, uint32_t buf_in_len, uint8_t *buf_out,
         and eventually sender sequence number*/
 	if (is_request(&oscore_packet)) {
 		/*Check that the recipient context c->rc has a  Recipient ID that
-		matches the received with the oscore option KID (Sender ID).
-		If this is not true return an error which indicates the caller
-		application to tray another context. This is useful when the caller
-		app doesn't know in advance to which context an incoming packet 
-                belongs.*/
+			 matches the received with the oscore option KID (Sender ID).
+			 If this is not true return an error which indicates the caller
+			 application to tray another context. This is useful when the caller
+			 app doesn't know in advance to which context an incoming packet 
+             belongs.*/
 		if (!array_equals(&c->rc.recipient_id, &oscore_option.kid)) {
 			return oscore_kid_recipient_id_mismatch;
 		}

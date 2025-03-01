@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "oscore/oscore_interactions.h"
+#include "oscore/option.h"
 #include "common/byte_array.h"
 #include "common/print_util.h"
 
@@ -248,9 +249,16 @@ oscore_interactions_get_record(struct oscore_interaction_t *interactions,
 
 enum err
 oscore_interactions_remove_record(struct oscore_interaction_t *interactions,
-				  uint8_t *token, uint8_t token_len)
+				  struct o_coap_packet * coap_packet)
 {
-	if ((NULL == interactions) || (token_len > MAX_TOKEN_LEN)) {
+	if ((NULL == interactions) || (NULL == coap_packet)) {
+		return wrong_parameter;
+	}
+
+	struct byte_array token =
+	BYTE_ARRAY_INIT(coap_packet->token, coap_packet->header.TKL);
+
+	if (token.len > MAX_TOKEN_LEN){
 		return wrong_parameter;
 	}
 
@@ -258,10 +266,10 @@ oscore_interactions_remove_record(struct oscore_interaction_t *interactions,
 	PRINT_INTERACTIONS(interactions);
 
 	uint32_t index =
-		find_record_index_by_token(interactions, token, token_len);
+		find_record_index_by_token(interactions, token.ptr, (uint8_t)token.len);
 	if (index >= OSCORE_INTERACTIONS_COUNT) {
 		PRINT_MSG(msg_interaction_not_found);
-		PRINT_ARRAY("token", token, token_len);
+		PRINT_ARRAY("token", token.ptr, token.len);
 		return oscore_interaction_not_found;
 	}
 
@@ -272,40 +280,57 @@ oscore_interactions_remove_record(struct oscore_interaction_t *interactions,
 }
 
 enum err oscore_interactions_read_wrapper(
-	enum o_coap_msg msg_type, struct byte_array *token,
 	struct oscore_interaction_t *interactions,
-	struct byte_array *request_piv, struct byte_array *request_kid)
+	struct o_coap_packet * coap_packet,
+	struct byte_array *request_piv, struct byte_array *request_kid,
+	uint8_t * no_response_value)
 {
-	if ((NULL == token) || (NULL == interactions) ||
+	if ((NULL == coap_packet) || (NULL == interactions) ||
 	    (NULL == request_piv) || (NULL == request_kid)) {
 		return wrong_parameter;
 	}
+
+	enum o_coap_msg msg_type;
+	TRY(coap_get_message_type(coap_packet, &msg_type));
+	struct byte_array token =
+		BYTE_ARRAY_INIT(coap_packet->token, coap_packet->header.TKL);
 
 	if ((COAP_MSG_RESPONSE == msg_type) ||
 	    (COAP_MSG_NOTIFICATION == msg_type)) {
 		/* Server sends / Client receives any response (notification included) - read the record from interactions array and update request_piv and request_kid. */
 		struct oscore_interaction_t *record;
-		TRY(oscore_interactions_get_record(interactions, token->ptr,
-						   (uint8_t)token->len,
-						   &record));
+		TRY(oscore_interactions_get_record(interactions, token.ptr,
+						   (uint8_t)token.len, &record));
+
 		request_piv->ptr = record->request_piv;
 		request_piv->len = record->request_piv_len;
 		request_kid->ptr = record->request_kid;
 		request_kid->len = record->request_kid_len;
+		if( NULL != no_response_value )
+		{
+			*no_response_value = record->no_response_value;
+		}
 	}
 
 	return ok;
 }
 
 enum err oscore_interactions_update_wrapper(
-	enum o_coap_msg msg_type, struct byte_array *token,
-	struct byte_array *uri_paths, struct oscore_interaction_t *interactions,
+	struct oscore_interaction_t *interactions, struct o_coap_packet * coap_packet,
 	struct byte_array *request_piv, struct byte_array *request_kid)
 {
-	if ((NULL == token) || (NULL == uri_paths) || (NULL == interactions) ||
+	if ((NULL == coap_packet) || (NULL == interactions) ||
 	    (NULL == request_piv) || (NULL == request_kid)) {
 		return wrong_parameter;
 	}
+	
+	enum o_coap_msg msg_type;
+	TRY(coap_get_message_type(coap_packet, &msg_type));
+	struct byte_array token =
+		BYTE_ARRAY_INIT(coap_packet->token, coap_packet->header.TKL);
+
+	BYTE_ARRAY_NEW(uri_paths, OSCORE_MAX_URI_PATH_LEN, OSCORE_MAX_URI_PATH_LEN);
+	TRY(uri_path_create(coap_packet->options, coap_packet->options_cnt, uri_paths.ptr, &(uri_paths.len)));
 
 	// cancellation must be interpreted as a registration, to properly match the corresponding record from the interactions table.
 	if (COAP_MSG_CANCELLATION == msg_type) {
@@ -314,29 +339,34 @@ enum err oscore_interactions_update_wrapper(
 
 	if ((COAP_MSG_REQUEST == msg_type) ||
 	    (COAP_MSG_REGISTRATION == msg_type)) {
+
 		/* Server receives / client sends any request (including registration and cancellation) - add the record to the interactions array.
 		   Request_piv and request_kid not updated - current values of PIV and KID (Sender ID) are used. */
 		struct oscore_interaction_t record = {
 			.request_piv_len = (uint8_t)request_piv->len,
 			.request_kid_len = (uint8_t)request_kid->len,
-			.token_len = (uint8_t)token->len,
-			.uri_paths_len = (uint8_t)uri_paths->len,
+			.token_len = (uint8_t)token.len,
+			.uri_paths_len = (uint8_t)uri_paths.len,
 			.request_type = msg_type
 		};
 		TRY(_memcpy_s(record.request_piv, MAX_PIV_LEN, request_piv->ptr,
 			      request_piv->len));
 		TRY(_memcpy_s(record.request_kid, MAX_KID_LEN, request_kid->ptr,
 			      request_kid->len));
-		TRY(_memcpy_s(record.token, MAX_TOKEN_LEN, token->ptr,
-			      token->len));
+		TRY(_memcpy_s(record.token, MAX_TOKEN_LEN, token.ptr,
+			      token.len));
 		TRY(_memcpy_s(record.uri_paths, OSCORE_MAX_URI_PATH_LEN,
-			      uri_paths->ptr, uri_paths->len));
+			      uri_paths.ptr, uri_paths.len));
+		struct byte_array no_response;
+		bool no_response_valid = get_no_response_value(coap_packet->options, coap_packet->options_cnt, &no_response);
+		if( no_response_valid && (1 == no_response.len ))
+		{
+			record.no_response_value = no_response.ptr[0];
+		}
 		TRY(oscore_interactions_set_record(interactions, &record));
 	} else if (COAP_MSG_RESPONSE == msg_type) {
 		/* Server sends / client receives a regular response - remove the record. */
-		//TODO removing records must be taken into account when No-Response support will be added.
-		TRY(oscore_interactions_remove_record(interactions, token->ptr,
-						      (uint8_t)token->len));
+		TRY(oscore_interactions_remove_record(interactions, coap_packet));
 	}
 
 	return ok;
