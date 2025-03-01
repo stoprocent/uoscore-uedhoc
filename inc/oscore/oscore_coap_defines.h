@@ -17,7 +17,15 @@
 #define MAX_KID_CONTEXT_LEN                                                    \
 	8 /*This implementation supports Context IDs up to 8 byte*/
 #define MAX_KID_LEN 8
-#define MAX_AAD_LEN 30
+/*Max AAD len (after encoding), check RFC 8613 p. 5.4 for details
+    oscore_version: (1)
+    algorithms: (1+1)
+    request_kid: (7+1)
+    request_piv: (5+1) see MAX_PIV_LEN
+    options: (0+1)
+    aad_array cbor header: (1)
+    AAD encryption header: (16) see ENCRYPT0_ENCODING_OVERHEAD*/
+#define MAX_AAD_LEN 35
 #define MAX_INFO_LEN 50
 #define MAX_PIV_FIELD_VALUE                                                    \
 	0xFFFFFFFFFF /* maximum possible value of SSN/PIV field is 2^40-1, according to RFC 8613 p. 7.2.1.*/
@@ -64,7 +72,12 @@
 #define CODE_RESP_CHANGED 0x44
 #define CODE_RESP_CONTENT 0x45
 #define CODE_RESP_UNAUTHORIZED 0x81
+#define CODE_RESP_NOT_IMPLEMENTED 0xa1
 #define REQUEST_CLASS 0x00
+#define RESPONSE_CLASS_2 0x02
+#define RESPONSE_CLASS_4 0x04
+#define RESPONSE_CLASS_5 0x05
+#define GET_MESSAGE_CLASS( CODE ) ( CODE >> 5u )
 
 #define OPTION_PAYLOAD_MARKER 0xFF
 
